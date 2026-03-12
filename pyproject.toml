@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ramp-ml"
+version = "0.1.0"
+description = "PyTorch 1D CNN/TCN pipeline for ramp-reset event detection in temperature time series."
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Diane Wang" }]
+dependencies = [
+  "numpy>=1.22",
+  "pandas>=1.5",
+  "openpyxl>=3.1",
+  "matplotlib>=3.5",
+  "torch>=2.0",
+  "torchvision",
+  "torchaudio",
+]
+
+[project.scripts]
+ramp-ml = "ramp_ml.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["ramp_ml*"]
