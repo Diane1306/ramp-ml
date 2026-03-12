@@ -1,7 +1,7 @@
 import torch.nn as nn
 
 
-class TCNReset(nn.Module):
+class TCNVITA(nn.Module):
     def __init__(self, ch: int = 48, k: int = 7):
         super().__init__()
         self.net = nn.Sequential(

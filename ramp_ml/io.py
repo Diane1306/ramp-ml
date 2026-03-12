@@ -27,13 +27,13 @@ def read_T_map(t_path: str, sheet: int = 0) -> Dict[str, np.ndarray]:
     return out
 
 
-def read_reset_map(reset_path: str, sheet: int = 0, mapping: str = "VITA_to_T") -> Dict[str, np.ndarray]:
+def read_VITA_map(VITA_path: str, sheet: int = 0, mapping: str = "VITA_to_T") -> Dict[str, np.ndarray]:
     """
     mapping:
       - VITA_to_T: VITA1 -> T1, VITA2 -> T2, ...
       - same: reset columns already named T1, T2, ...
     """
-    df = _read_table(reset_path, sheet=sheet)
+    df = _read_table(VITA_path, sheet=sheet)
     out: Dict[str, np.ndarray] = {}
 
     if mapping == "same":
@@ -57,8 +57,8 @@ def read_reset_map(reset_path: str, sheet: int = 0, mapping: str = "VITA_to_T") 
     raise ValueError(f"Unknown mapping={mapping}")
 
 
-def sanity_check(T_map: Dict[str, np.ndarray], reset_map: Dict[str, np.ndarray]) -> None:
-    for tname, idx in reset_map.items():
+def sanity_check(T_map: Dict[str, np.ndarray], VITA_map: Dict[str, np.ndarray]) -> None:
+    for tname, idx in VITA_map.items():
         if tname not in T_map:
             print(f"[WARN] {tname} exists in reset file but not in T file.")
             continue
@@ -67,5 +67,5 @@ def sanity_check(T_map: Dict[str, np.ndarray], reset_map: Dict[str, np.ndarray])
         if len(bad) > 0:
             print(f"[WARN] {tname} has out-of-range indices (0..{n-1}), e.g. {bad[:10]}")
     for tname in T_map.keys():
-        if tname not in reset_map:
+        if tname not in VITA_map:
             print(f"[WARN] {tname} exists in T file but has no reset indices in reset file.")

@@ -18,14 +18,14 @@ class MultiResetWindows(Dataset):
     def __init__(
         self,
         T_map: Dict[str, np.ndarray],
-        reset_map: Dict[str, np.ndarray],
+        VITA_map: Dict[str, np.ndarray],
         win: int,
         stride: int,
         pos_radius: int,
         series_balance: str = "equal",  # equal or proportional
     ):
         self.T_map = T_map
-        self.reset_map = reset_map
+        self.VITA_map = VITA_map
         self.win = int(win)
         self.stride = int(stride)
         self.pos_radius = int(pos_radius)
@@ -40,14 +40,14 @@ class MultiResetWindows(Dataset):
             if n < self.win:
                 continue
 
-            resets = self.reset_map.get(tname, np.array([], dtype=int))
-            reset_set = set(int(i) for i in resets)
+            resets = self.VITA_map.get(tname, np.array([], dtype=int))
+            VITA_set = set(int(i) for i in resets)
 
             refs: List[Tuple[SampleRef, np.ndarray]] = []
             for s in range(0, n - self.win + 1, self.stride):
                 e = s + self.win
                 y = np.zeros(self.win, dtype=np.float32)
-                for ridx in reset_set:
+                for ridx in VITA_set:
                     if s <= ridx < e:
                         center = ridx - s
                         lo = max(0, center - self.pos_radius)

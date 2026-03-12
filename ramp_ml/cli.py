@@ -6,14 +6,23 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from ramp_ml.io import read_T_map, read_reset_map, sanity_check
+from ramp_ml.io import read_T_map, read_VITA_map, sanity_check
 from ramp_ml.dataset import MultiResetWindows
-from ramp_ml.model import TCNReset
+from ramp_ml.model import TCNVITA
 from ramp_ml.inference import infer_scores_one_series, pick_events_one_per_window
 from ramp_ml.gating import filter_by_ramp_gate
 from ramp_ml.eval import match_events_with_tolerance
 from ramp_ml.plotting import plot_series_with_events
-
+from ramp_ml.utils import (
+    set_seed,
+    ensure_dir,
+    save_json,
+    save_predictions_json,
+    save_scores_npy,
+    save_checkpoint,
+    load_checkpoint,
+    apply_checkpoint,
+)
 
 def _parse_series_list(arg: Optional[str], available: Set[str], what: str) -> Optional[List[str]]:
     if arg is None:
@@ -35,9 +44,9 @@ def _subset_map(full: Dict[str, np.ndarray], keep: List[str]) -> Dict[str, np.nd
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--t_path", required=True)
-    ap.add_argument("--reset_path", required=True)
+    ap.add_argument("--VITA_path", required=True)
     ap.add_argument("--t_sheet", type=int, default=0)
-    ap.add_argument("--reset_sheet", type=int, default=0)
+    ap.add_argument("--VITA_sheet", type=int, default=0)
     ap.add_argument("--mapping", default="VITA_to_T", choices=["VITA_to_T", "same"])
 
     ap.add_argument("--fs", type=float, default=1.0)
@@ -71,7 +80,28 @@ def main():
     ap.add_argument("--test_T", default=None)
     ap.add_argument("--match_tol_sec", type=float, default=2.0)
 
+    ap.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
+    ap.add_argument("--deterministic", action="store_true",
+                    help="Force deterministic algorithms (recommended for reproduction)")
+
+    ap.add_argument("--save_dir", type=str, default=None, help="Directory to save run artifacts")
+    ap.add_argument("--save_model", action="store_true", help="Save checkpoint/config/predictions into save_dir")
+    ap.add_argument("--save_scores", action="store_true", help="Also save per-series score arrays (.npy) into save_dir")
+
+    ap.add_argument("--load_model", type=str, default=None,
+                    help="Path to checkpoint.pt to reproduce predictions (skips training)")
+    ap.add_argument("--device", type=str, default=None, choices=["cpu", "cuda"],
+                    help="Force device (cpu is most reproducible)")
+
     args = ap.parse_args()
+
+    # device selection (CPU is easiest for exact reproducibility)
+    if args.device is not None:
+        device = args.device
+    else:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    set_seed(args.seed, deterministic=args.deterministic)
 
     fs = float(args.fs)
     win = int(round(args.win_sec * fs))
@@ -84,8 +114,8 @@ def main():
 
     # load
     T_all = read_T_map(args.t_path, sheet=args.t_sheet)
-    reset_all = read_reset_map(args.reset_path, sheet=args.reset_sheet, mapping=args.mapping)
-    sanity_check(T_all, reset_all)
+    VITA_all = read_VITA_map(args.VITA_path, sheet=args.VITA_sheet, mapping=args.mapping)
+    sanity_check(T_all, VITA_all)
 
     available = set(T_all.keys())
     train_list = _parse_series_list(args.train_T, available, "--train_T")
@@ -97,51 +127,68 @@ def main():
         test_list = sorted(list(available), key=lambda s: int(s[1:]))
 
     T_train = _subset_map(T_all, train_list)
-    reset_train = _subset_map(reset_all, train_list)
+    VITA_train = _subset_map(VITA_all, train_list)
     T_test = _subset_map(T_all, test_list)
-    reset_test = _subset_map(reset_all, test_list)
+    VITA_test = _subset_map(VITA_all, test_list)
 
     print("\nTRAIN series:", train_list)
     print("TEST  series:", test_list)
     print("event_mode:", args.event_mode)
 
+    save_dir = None
+    if args.save_model or args.save_scores:
+        if args.save_dir is None:
+            raise ValueError("--save_dir must be provided when using --save_model or --save_scores")
+        save_dir = ensure_dir(args.save_dir)
+
     # dataset + loader
-    ds = MultiResetWindows(T_train, reset_train, win=win, stride=stride, pos_radius=pos_radius, series_balance=args.series_balance)
+    ds = MultiResetWindows(T_train, VITA_train, win=win, stride=stride, pos_radius=pos_radius, series_balance=args.series_balance)
     if len(ds) == 0:
         raise ValueError("Training dataset is empty. Check train_T and win/stride.")
     dl = DataLoader(ds, batch_size=args.batch_size, shuffle=True, drop_last=False)
 
     # model
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = TCNReset().to(device)
+    # device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = TCNVITA().to(device)
+
+    # If loading a checkpoint, skip training and reproduce predictions
+    if args.load_model is not None:
+        ckpt = load_checkpoint(args.load_model, device=device)
+        apply_checkpoint(model, ckpt)
+        print(f"[loaded] {args.load_model}")
 
     pos_frac = float(ds.labels.mean()) if ds.labels.size else 0.0
     pos_weight = torch.tensor([(1.0 - pos_frac) / (pos_frac + 1e-8)], device=device)
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
-    # train
-    model.train()
-    for epoch in range(args.epochs):
-        losses = []
-        for xb, yb in dl:
-            xb, yb = xb.to(device), yb.to(device)
-            logits = model(xb)
-            loss = criterion(logits, yb)
-            opt.zero_grad()
-            loss.backward()
-            opt.step()
-            losses.append(float(loss.item()))
-        print(f"epoch {epoch+1:02d} loss={float(np.mean(losses)):.4f}")
+    if args.load_model is None:
+        # train
+        model.train()
+        for epoch in range(args.epochs):
+            losses = []
+            for xb, yb in dl:
+                xb, yb = xb.to(device), yb.to(device)
+                logits = model(xb)
+                loss = criterion(logits, yb)
+                opt.zero_grad()
+                loss.backward()
+                opt.step()
+                losses.append(float(loss.item()))
+            print(f"epoch {epoch+1:02d} loss={float(np.mean(losses)):.4f}")
 
     # test
     print("\nInference / Compare-to-VITA (TEST set):")
     total_tp = total_fp = total_fn = 0
     all_pred = {}
+    all_scores = {}
 
     for tname in sorted(T_test.keys(), key=lambda s: int(s[1:])):
         T = T_test[tname]
         score = infer_scores_one_series(model, T, win=win, stride=stride, device=device)
+
+        if args.save_scores:
+            all_scores[tname] = score
 
         pred_idx = pick_events_one_per_window(
             score=score,
@@ -166,7 +213,7 @@ def main():
 
         all_pred[tname] = pred_idx
 
-        gt = reset_test.get(tname, np.array([], dtype=int))
+        gt = VITA_test.get(tname, np.array([], dtype=int))
         tp, fp, fn = match_events_with_tolerance(pred_idx, gt, tol=tol_n)
         total_tp += tp
         total_fp += fp
@@ -191,3 +238,26 @@ def main():
     rec = total_tp / (total_tp + total_fn + 1e-12)
     f1 = 2 * prec * rec / (prec + rec + 1e-12)
     print(f"\nTEST summary: TP={total_tp} FP={total_fp} FN={total_fn} | Precision={prec:.3f} Recall={rec:.3f} F1={f1:.3f}")
+
+    if save_dir is not None:
+        # Save config used for this run (including seed)
+        save_json(os.path.join(save_dir, "config.json"), vars(args))
+        save_json(os.path.join(save_dir, "train_test.json"), {"train_list": train_list, "test_list": test_list})
+
+        # Save predictions
+        save_predictions_json(os.path.join(save_dir, "pred_idx.json"), all_pred)
+
+        # Save scores (optional)
+        if args.save_scores:
+            save_scores_npy(save_dir, all_scores)
+
+        # Save checkpoint (optional)
+        if args.save_model:
+            save_checkpoint(
+                os.path.join(save_dir, "checkpoint.pt"),
+                model=model,
+                args_dict=vars(args),
+                train_list=train_list,
+                test_list=test_list,
+            )
+            print(f"[saved] {os.path.join(save_dir, 'checkpoint.pt')}")

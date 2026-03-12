@@ -5,7 +5,6 @@ This repository develops a **PyTorch neural-network detector** for identifying *
 
 ### Install (recommended)
 ```bash
-mkdir -p ramp-ml/ramp_ml ramp-ml/scripts ramp-ml/tests
 python -m venv .venv
 source .venv/bin/activate
 pip install -U pip
